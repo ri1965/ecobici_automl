@@ -1,0 +1,71 @@
+# =====================================================
+# 🧹 ECObici-AutoML — Proyecto limpio y reproducible
+# =====================================================
+
+# === Archivos y carpetas del sistema ===
+.DS_Store
+Thumbs.db
+__pycache__/
+*.log
+*.tmp
+*.bak
+
+# === Datos locales (no versionables) ===
+data/
+outputs/
+archive/
+mlruns/
+predictions/
+tiles/
+visuals/
+
+# === Notebooks y checkpoints ===
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+notebooks/.DS_Store
+
+# === Modelos y artefactos pesados ===
+models/
+*.pkl
+*.zip
+*.jar
+*.h5
+*.onnx
+*.sav
+*.joblib
+
+# === Archivos intermedios o temporales ===
+logs.log
+*.parquet
+*.csv
+*.json
+*.gz
+*.html
+*.geojson
+*.tsv
+
+# === Configuración local y entornos ===
+.env
+envs/
+venv/
+.envrc
+*.yml~
+*.yaml~
+*.json~
+*.old
+*.swp
+
+# === Experimentos, monitorización y reportes pesados ===
+reports/experiments/
+reports/logs/
+reports/monitoring/
+
+# === MLflow y metadata ===
+mlruns/
+mlartifacts/
+
+# === Copias y documentación temporal ===
+archive/
+docs/dev/*.json
+docs/dev/*.txt
+repo_tree.txt

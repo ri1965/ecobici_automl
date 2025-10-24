@@ -1,0 +1,31 @@
+# === Núcleo científico (compatible con PyCaret 3.3.2) ===
+pandas==2.1.4
+numpy==1.26.4
+scipy==1.11.4
+scikit-learn==1.4.2
+matplotlib==3.7.5
+seaborn>=0.12
+jinja2>=3.1
+pyarrow
+ipykernel
+
+# === AutoEDA ===
+ydata-profiling==4.6.4
+autoviz==0.1.905
+sweetviz==2.3.1
+dtale==3.3.0
+
+# === Auto Feature Engineering ===
+featuretools
+
+# === AutoML ===
+pycaret==3.3.2
+lightgbm==4.6.0
+xgboost>=2.0.0
+sktime==0.26.0
+scikit-base<0.8
+
+# === App / Visualización ===
+streamlit
+plotly>=5.14
+requests>=2.31
