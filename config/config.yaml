@@ -1,24 +1,33 @@
+# =====================================================
+# 🧩 CONFIGURACIÓN BÁSICA — ECOBICI AUTOML
+# =====================================================
+
+project:
+  name: "Ecobici-AutoML"
+  version: "0.1.0"
+  author: "R. Inza"
+  description: "Predicción de disponibilidad de bicicletas en el sistema Ecobici (BA)."
+
 paths:
-  # Si vas a trabajar con un único archivo preparado con ts:
-  raw_glob: "data/ecobici_station_status_with_ts.parquet"
-  # O, si más adelante sumás snapshots, cambiá por: "data/*.parquet"
+  data_raw: "data/raw/"
+  data_interim: "data/interim/"
+  data_curated: "data/curated/"
+  outputs: "outputs/"
+  models: "models/"
+  reports: "reports/"
+  logs: "logs.log"
 
-  curated: "data/curated/ecobici_timeseries.parquet"
-  training_dir: "data/training"
-  models_dir: "models"
+modeling:
+  target: "num_bikes_available"
+  horizon_hours: [1, 3, 6, 12]
+  test_size: 0.2
+  random_state: 42
 
-prepare:                # usado por src/prepare_from_parquet.py
-  emit_train: true
-  horizons: [10, 20]    # los que ya generaste: train_10min / train_20min
-  tz_local: "America/Argentina/Buenos_Aires"
+automl:
+  frameworks: ["pycaret", "h2o", "flaml"]
+  metric: "RMSE"
+  optimize: true
 
-train:                  # usado por src/train_model.py
-  target_prefix: "target_bikes_t+"
-  default_horizon: 10   # usa train_10min.parquet por defecto
-  session_id: 123
+runtime:
   use_gpu: false
-  log_experiment: false
-  n_select: 10          # cantidad de modelos a comparar (compare_models)
-
-app:                    # reservado para la app (futuro)
-  default_horizon: 10
+  mlflow_tracking_uri: "mlruns/"
