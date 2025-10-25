@@ -68,4 +68,11 @@ mlartifacts/
 archive/
 docs/dev/*.json
 docs/dev/*.txt
-repo_tree.txt
+repo_tree.txt__pycache__/
+*.parquet
+*.pkl
+mlruns/
+tiles/
+predictions/
+data/raw/
+data/interim/
