@@ -194,17 +194,13 @@ automl-all: automl-pycaret automl-flaml
 
 
 # ---- Paso 7: Comparación y registro del mejor modelo ----
-compare-models:
-	@echo "⚖️  Paso 7: comparando modelos (baseline, PyCaret y FLAML)"
-	$(PY) src/compare_and_register.py \
-	  --bench reports/automl_bench.csv \
-	  --reports reports \
-	  --metric val_rmse \
+select-best:
+	@echo "⚖️  Paso 7: comparando y registrando el mejor modelo..."
+	$(PY) src/register_best.py \
+	  --bench_csv reports/automl_bench.csv \
 	  --mlflow-uri mlruns \
-	  --experiment ecobici_model_selection \
-	  --model-name ecobici_best \
-	  --stage Staging
-	@echo "✅ Comparación y registro completados: ver reports/model_selection.csv"
+	  --registry_name ecobici_best \
+	  --out_selection reports/model_selection.csv
 
 
 # ==========================================================
@@ -248,3 +244,10 @@ tiles:
 	fi; \
 	cp -f "$$latest_tile" tiles/latest.parquet; \
 	echo "✅ Tiles listos → tiles/latest.parquet -> $$latest_tile"	
+
+
+# ---- Smoke check: verificación rápida sin correr el pipeline completo
+.PHONY: smoke
+smoke:
+	@echo "🧪 Smoke check: verificando entorno, benchmark, modelos y predicción mínima..."
+	$(PY) tools/smoke_check.py	
