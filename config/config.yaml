@@ -56,7 +56,7 @@ inference:
 registry:
   compare_metric: "RMSE"
   promote_if_better: true
-  champion_path: "models/03D/best_model.pkl"   # 👈 apunta al archivo real que ya tenés
+  champion_path: "models/Champion/best_model.pkl"   # 👈 apunta al archivo real que ya tenés
 
 pycaret:
   experiment_name: "ecobici_pycaret"
