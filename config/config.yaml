@@ -1,33 +1,65 @@
 # =====================================================
-# 🧩 CONFIGURACIÓN BÁSICA — ECOBICI AUTOML
+# 🧩 CONFIGURACIÓN — ECOBICI-AUTOML
 # =====================================================
 
 project:
   name: "Ecobici-AutoML"
-  version: "0.1.0"
+  version: "1.0.0"
   author: "R. Inza"
-  description: "Predicción de disponibilidad de bicicletas en el sistema Ecobici (BA)."
-
-paths:
-  data_raw: "data/raw/"
-  data_interim: "data/interim/"
-  data_curated: "data/curated/"
-  outputs: "outputs/"
-  models: "models/"
-  reports: "reports/"
-  logs: "logs.log"
-
-modeling:
-  target: "num_bikes_available"
-  horizon_hours: [1, 3, 6, 12]
-  test_size: 0.2
-  random_state: 42
-
-automl:
-  frameworks: ["pycaret", "h2o", "flaml"]
-  metric: "RMSE"
-  optimize: true
+  description: "Predicción de disponibilidad de bicicletas en Ecobici (Buenos Aires)."
 
 runtime:
   use_gpu: false
-  mlflow_tracking_uri: "mlruns/"
+  log_level: "INFO"
+  mlflow_tracking_uri: "mlruns"     # carpeta local
+
+paths:
+  # === Datos ===
+  raw_dir: "data/raw"
+  features_in: "data/raw/status_clean.parquet"          # entrada para prepare_features
+  curated_file: "data/curated/ecobici_model_ready.parquet"
+  stations_file: "data/curated/station_information.parquet"
+
+  # === Splits (si se usan) ===
+  splits_dir: "data/splits"
+  train_split: "data/splits/train.parquet"
+  val_split: "data/splits/val.parquet"
+  test_split: "data/splits/test.parquet"
+
+  # === Artefactos y salidas ===
+  models_dir: "models"
+  mlruns_dir: "mlruns"
+  predictions_dir: "predictions"
+  tiles_dir: "tiles"
+  reports_dir: "reports"
+  logs_dir: "reports/logs"
+
+data:
+  target: "num_bikes_available"     # variable objetivo
+  id_col: "station_id"
+  ts_col: "ts_local"
+
+training:
+  framework: "pycaret"              # opciones: "pycaret" o "flaml"
+  metric: "RMSE"
+  optimize: true
+  random_state: 42
+  test_size: 0.2
+
+backtest:
+  horizons: [1, 3, 6, 12]
+
+inference:
+  horizons: [1, 3, 6, 12]
+  asof: "2025-10-26 18:00:00"      # referencia temporal para predicción batch
+
+registry:
+  compare_metric: "RMSE"
+  promote_if_better: true
+  champion_path: "models/03D/best_model.pkl"   # 👈 apunta al archivo real que ya tenés
+
+pycaret:
+  experiment_name: "ecobici_pycaret"
+
+flaml:
+  time_budget_sec: 600

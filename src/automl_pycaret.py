@@ -157,7 +157,8 @@ def main(args):
     append_metrics_csv(metrics_path, rows)
 
     # --- MLflow logging
-    with mlflow.start_run(run_name="pycaret_automl_final"):
+    
+    with mlflow.start_run(run_name="pycaret_automl_final", nested=True):
         mlflow.log_param("folds", args.folds)
         mlflow.log_param("metric_sort", args.metric)
         mlflow.log_param("seed", args.seed)
