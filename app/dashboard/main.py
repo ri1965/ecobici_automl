@@ -276,7 +276,7 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
         m,
         height=620,
         use_container_width=True,  # no está deprecado en st_folium
-        key=f"map_clickable_{st.session_state.get('station_focus_id')}_{st.session_state.get('map_zoom', 13)}",
+        key=f"map_clickable",
         returned_objects=["last_clicked", "center", "zoom"]
     )
 
@@ -297,16 +297,9 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
         idx = int(np.argmin(d))
         new_focus = df_map.iloc[idx]
 
-        # (opcional) snap: ignorar clicks lejos de estaciones
-        # if float(d[idx]) > 80: st.stop()
-
-        # 1) foco por id (para tu lógica downstream)
         st.session_state["station_focus_id"] = int(new_focus["station_id"])
-
-        # 2) marcar sincronización para el próximo render (pre-widget)
         st.session_state["__sync_focus__"] = True
 
-        # 3) mantener vista si lock_view, o recentrar si no
         if not lock_view:
             st.session_state["map_center"] = [float(new_focus["lat"]), float(new_focus["lon"])]
             st.session_state["map_zoom"] = 14
