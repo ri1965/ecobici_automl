@@ -1,137 +1,79 @@
-import os
-import pandas as pd
+# utils.py (reemplazar la función load_predictions por esta)
 
-# Paths
-DATA_DIR = os.path.join("data", "curated")
-REPORTS_DIR = os.path.join("reports")
+from __future__ import annotations
+import pandas as pd
+import numpy as np
+from pathlib import Path
+
+def _concat_parquets(paths: list[Path]) -> pd.DataFrame:
+    dfs = []
+    for p in paths:
+        try:
+            df = pd.read_parquet(p)
+            df["__srcfile__"] = str(p)
+            dfs.append(df)
+        except Exception:
+            pass
+    if not dfs:
+        return pd.DataFrame()
+    out = pd.concat(dfs, ignore_index=True)
+    out.attrs["__source_path__"] = ", ".join([str(p) for p in paths])
+    return out
 
 def load_predictions() -> pd.DataFrame:
-    """Carga el parquet de predicciones más reciente desde /predictions."""
-    preds_dir = "predictions"
-    if not os.path.exists(preds_dir):
-        return pd.DataFrame()
+    """Carga predicciones en modo slots si existen; sino, modo horizonte (legacy)."""
+    # --- 1) Intentar modo SLOTS ---
+    slots_dir = Path("predictions/slots")
+    slot_files = sorted(slots_dir.glob("*/predictions.parquet"))
+    if slot_files:
+        df = _concat_parquets(slot_files)
+        # columnas mínimas esperadas en slots
+        # station_id | t_slot | slot_label | yhat | generated_at
+        # Normalización
+        if "station_id" in df.columns:
+            s = df["station_id"].astype(str)
+            df["station_id"] = pd.to_numeric(s, errors="coerce").astype("Int64") if s.str.fullmatch(r"\d+").all() else s
+        if "t_slot" in df.columns:
+            df["t_slot"] = pd.to_datetime(df["t_slot"], errors="coerce", utc=False)
+        if "yhat" in df.columns:
+            df["yhat"] = pd.to_numeric(df["yhat"], errors="coerce")
+        # asegurar columna 'slot_label'
+        if "slot_label" not in df.columns:
+            # si no vino, tratar de inferirla del path (0900, 1300, etc.)
+            try:
+                df["slot_label"] = df["__srcfile__"].str.extract(r"/slots/(\d{4})/")[0].str.replace(
+                    r"(\d{2})(\d{2})", r"\1:\2", regex=True
+                )
+            except Exception:
+                pass
+        return df
 
-    files = [f for f in os.listdir(preds_dir) if f.endswith(".parquet")]
-    if not files:
-        return pd.DataFrame()
+    # --- 2) Fallback: modo HORIZONTE (legacy) ---
+    legacy_files = sorted(Path("predictions").glob("*.parquet"))
+    if legacy_files:
+        df = _concat_parquets(legacy_files)
+        # columnas típicas legacy: station_id | ts | h | yhat ...
+        if "station_id" in df.columns:
+            s = df["station_id"].astype(str)
+            df["station_id"] = pd.to_numeric(s, errors="coerce").astype("Int64") if s.str.fullmatch(r"\d+").all() else s
+        if "ts" in df.columns:
+            df["ts"] = pd.to_datetime(df["ts"], errors="coerce", utc=False)
+        if "yhat" in df.columns:
+            df["yhat"] = pd.to_numeric(df["yhat"], errors="coerce")
+        return df
 
-    # el más nuevo por mtime
-    latest = max(files, key=lambda f: os.path.getmtime(os.path.join(preds_dir, f)))
-    path = os.path.join(preds_dir, latest)
-
-    try:
-        df = pd.read_parquet(path)
-    except Exception as e:
-        print(f"[WARN] No se pudo leer {path}: {e}")
-        return pd.DataFrame()
-
-    # Normalizaciones
-    # timestamp
-    if "ts" not in df.columns:
-        for cand in ["timestamp_pred", "timestamp", "time", "ts_local", "last_reported", "fecha"]:
-            if cand in df.columns:
-                df = df.rename(columns={cand: "ts"})
-                break
-    # yhat
-    if "yhat" not in df.columns:
-        for cand in ["y_pred", "pred", "predicted_bikes", "prediction", "forecast"]:
-            if cand in df.columns:
-                df = df.rename(columns={cand: "yhat"})
-                break
-    # id
-    if "station_id" not in df.columns:
-        for cand in ["id_station", "id", "station"]:
-            if cand in df.columns:
-                df = df.rename(columns={cand: "station_id"})
-                break
-    # h
-    if "h" not in df.columns:
-        for cand in ["horizon", "horas", "h_pred"]:
-            if cand in df.columns:
-                df = df.rename(columns={cand: "h"})
-                break
-
-    # tipos
-    if "ts" in df.columns:
-        df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
-    if "station_id" in df.columns:
-        df["station_id"] = pd.to_numeric(df["station_id"], errors="coerce").astype("Int64")
-    if "h" in df.columns:
-        df["h"] = pd.to_numeric(df["h"], errors="coerce").astype("Int64")
-    if "yhat" in df.columns:
-        df["yhat"] = pd.to_numeric(df["yhat"], errors="coerce")
-
-    # guarda la ruta para mostrar en el dashboard
-    df.attrs["__source_path__"] = path
-
-    print(f"[INFO] Predicciones: {path} ({len(df)} filas)")
-    return df
+    # --- 3) Si no hay nada, devolver DF vacío con columnas estándar ---
+    empty = pd.DataFrame(columns=["station_id", "t_slot", "slot_label", "yhat"])
+    empty.attrs["__source_path__"] = "(sin archivos de predicción encontrados)"
+    return empty
 
 def load_stations() -> pd.DataFrame:
-    for cand in ["station_information.parquet", "status_information.parquet"]:
-        p = os.path.join(DATA_DIR, cand)
-        if os.path.exists(p):
-            try:
-                return pd.read_parquet(p)
-            except Exception as e:
-                print(f"[WARN] No se pudo leer {p}: {e}")
-    return pd.DataFrame()
-
-def load_model_selection() -> pd.DataFrame:
-    for cand in ["model_selection.csv", "automl_bench.csv"]:
-        p = os.path.join(REPORTS_DIR, cand)
-        if os.path.exists(p):
-            try:
-                return pd.read_csv(p)
-            except Exception as e:
-                print(f"[WARN] No se pudo leer {p}: {e}")
-    return pd.DataFrame()
-
-def load_metrics_by_split() -> pd.DataFrame:
-    for cand in ["metrics_by_split.csv", "automl_metrics_by_split.csv"]:
-        p = os.path.join(REPORTS_DIR, cand)
-        if os.path.exists(p):
-            try:
-                return pd.read_csv(p)
-            except Exception as e:
-                print(f"[WARN] No se pudo leer {p}: {e}")
-    return pd.DataFrame()
-
-def load_backtest_summary() -> pd.DataFrame:
-    p = os.path.join(REPORTS_DIR, "backtest_summary.csv")
-    if os.path.exists(p):
-        try:
-            return pd.read_csv(p)
-        except Exception as e:
-            print(f"[WARN] No se pudo leer {p}: {e}")
-    return pd.DataFrame()
-
-def load_backtest_samples() -> pd.DataFrame:
-    files = [f for f in os.listdir(REPORTS_DIR)
-             if "backtest_split" in f and f.endswith("_sample_preds.csv")]
-    if not files:
-        return pd.DataFrame()
-    dfs = []
-    for f in sorted(files):
-        try:
-            df = pd.read_csv(os.path.join(REPORTS_DIR, f))
-            df["split"] = f.split("_sample_preds.csv")[0].replace("backtest_", "")
-            dfs.append(df)
-        except Exception as e:
-            print(f"[WARN] No se pudo leer {f}: {e}")
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-
-def load_feature_importance(top_n: int = 20) -> pd.DataFrame:
-    for cand in ["feature_importance_rf.csv", "feature_importance.csv"]:
-        p = os.path.join(REPORTS_DIR, cand)
-        if os.path.exists(p):
-            try:
-                df = pd.read_csv(p)
-                if df.shape[1] == 2:
-                    df.columns = ["feature", "importance"]
-                if "importance" in df.columns:
-                    df = df.sort_values("importance", ascending=False).head(top_n)
-                return df
-            except Exception as e:
-                print(f"[WARN] No se pudo leer {p}: {e}")
-    return pd.DataFrame()
+    # tu versión anterior; dejo un fallback robusto por si acaso
+    for p in [
+        Path("data/curated/station_information.parquet"),
+        Path("data/raw/station_information.parquet"),
+    ]:
+        if p.exists():
+            df = pd.read_parquet(p)
+            return df
+    return pd.DataFrame(columns=["station_id","name","lat","lon","capacity"])

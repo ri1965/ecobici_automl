@@ -66,11 +66,15 @@ def time_features_from_ts(ts: pd.Timestamp) -> dict:
     }
 
 def make_X_y_train_schema(df: pd.DataFrame, y_col: str, id_col: str, ts_col: str):
+    """Deriva el esquema de columns numéricas a partir del split de train (como en training)."""
+    df = df.copy()
+    if ts_col in df.columns:
+        df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
+        df = df.dropna(subset=[ts_col]).sort_values(ts_col).reset_index(drop=True)
+    df[y_col] = pd.to_numeric(df[y_col], errors="coerce")
     drop_cols = [c for c in [y_col, id_col, ts_col] if c in df.columns]
     X = df.drop(columns=drop_cols, errors="ignore").copy()
-    X = expand_json_like_columns(X, exclude=[])
-    X = onehot_low_card(X)
-    X = X.select_dtypes(include=["number"]).fillna(0.0)
+    X = make_numeric_features(X)
     y = df[y_col].astype(float).copy()
     return X, y
 
@@ -78,7 +82,6 @@ def _ensure_naive_datetime(series: pd.Series) -> pd.Series:
     """Si viene con tz, lo vuelve naive preservando hora local."""
     try:
         if getattr(series.dt, "tz", None) is not None:
-            # si tiene tz, la quitamos (hora local)
             return series.dt.tz_convert(None) if hasattr(series.dt, "tz_convert") else series.dt.tz_localize(None)
     except Exception:
         pass
@@ -93,6 +96,71 @@ def _coerce_station_id_dtype(s: pd.Series) -> pd.Series:
 TIME_KEYS = {"hour","dow","month","is_weekend","hour_sin","hour_cos"}
 LAG_KEYS  = {"y_lag1","y_lag2","y_ma3"}
 BLOCK_KEYS = TIME_KEYS | LAG_KEYS
+
+# -------------------------------
+# Descubrir columnas esperadas
+# -------------------------------
+def discover_expected_columns(model, fallback_cols: list[str]) -> list[str]:
+    """
+    Devuelve las columnas EXACTAS que el modelo espera.
+    - Busca feature_names_in_ en el modelo o en sus steps (Pipeline).
+    - Si no encuentra, usa fallback_cols (esquema del split de train).
+    """
+    # 1) Directo
+    if hasattr(model, "feature_names_in_"):
+        return list(model.feature_names_in_)
+
+    # 2) Pipelines sklearn/pycaret
+    tried = set()
+    def _walk(obj):
+        if id(obj) in tried:
+            return None
+        tried.add(id(obj))
+        # atributo directo
+        if hasattr(obj, "feature_names_in_"):
+            return list(obj.feature_names_in_)
+        # sklearn Pipeline: obj.steps
+        if hasattr(obj, "steps") and isinstance(obj.steps, list):
+            for name, step in obj.steps:
+                cols = _walk(step)
+                if cols is not None:
+                    return cols
+        # ColumnTransformer: transformers_
+        if hasattr(obj, "transformers_"):
+            for _, trans, _ in getattr(obj, "transformers_", []):
+                cols = _walk(trans)
+                if cols is not None:
+                    return cols
+        # pycaret internal
+        if hasattr(obj, "named_steps"):
+            for step in obj.named_steps.values():
+                cols = _walk(step)
+                if cols is not None:
+                    return cols
+        return None
+
+    cols = _walk(model)
+    return list(cols) if cols is not None else list(fallback_cols)
+
+# -------------------------------
+# Predicción agnóstica
+# -------------------------------
+def predict_any(model, X: pd.DataFrame) -> np.ndarray:
+    """
+    Si es un modelo de PyCaret, intentamos predict_model para que respete su pipeline.
+    Si falla o no está PyCaret, usamos .predict.
+    """
+    try:
+        from pycaret.regression import predict_model as _pc_predict_model
+        try:
+            out = _pc_predict_model(model, data=X.copy())
+            return pd.to_numeric(out["prediction_label"], errors="coerce").astype(float).values
+        except Exception:
+            pass
+    except Exception:
+        pass
+    # fallback genérico
+    return np.asarray(model.predict(X), dtype=float)
 
 # ===============================
 # Core
@@ -130,9 +198,10 @@ def main(
 
     model = joblib.load(model_path)
     if not hasattr(model, "predict"):
+        # aunque intentamos predict_model arriba, exigimos .predict para fallback
         raise ValueError("El modelo cargado no expone .predict().")
 
-    # --- Datos
+    # --- Datos base
     df = pd.read_parquet(data_path).copy()
     if ts_col not in df.columns or id_col not in df.columns or y_col not in df.columns:
         raise ValueError(f"Faltan columnas requeridas. Tengo: {df.columns.tolist()}")
@@ -143,8 +212,7 @@ def main(
     df[id_col] = _coerce_station_id_dtype(df[id_col])
 
     # --- Resolver asof
-    if asof_str.lower() == "now":
-        # usar el máximo timestamp disponible como referencia
+    if str(asof_str).lower() == "now":
         asof_ts = df[ts_col].max()
     else:
         asof_ts = pd.to_datetime(asof_str, errors="coerce")
@@ -165,14 +233,17 @@ def main(
     n_st = latest[id_col].nunique()
     print(f"Estaciones con dato ≤ asof: {n_st}")
 
-    # --- Esquema de entrenamiento (para alinear columnas)
+    # --- Esquema base desde TRAIN (fallback)
     df_train_for_schema = pd.read_parquet(train_split_path)
     X_schema, _ = make_X_y_train_schema(df_train_for_schema, y_col, id_col, ts_col)
-    TRAIN_COLS = [c.strip().lower() for c in X_schema.columns]
+    TRAIN_COLS = list(X_schema.columns)
 
-    # Debug: ver presencia de tiempo/lags en el esquema
-    print("[DEBUG] cols ∩ tiempo:", sorted(set(TRAIN_COLS) & TIME_KEYS))
-    print("[DEBUG] cols ∩ lags:  ", sorted(set(TRAIN_COLS) & LAG_KEYS))
+    # --- Lista FINAL esperada por el modelo (prioriza feature_names_in_)
+    EXPECTED_COLS = discover_expected_columns(model, TRAIN_COLS)
+
+    # Debug
+    print("[DEBUG] cols ∩ tiempo:", sorted(set(EXPECTED_COLS) & TIME_KEYS))
+    print("[DEBUG] cols ∩ lags:  ", sorted(set(EXPECTED_COLS) & LAG_KEYS))
 
     # --- Features estáticas (numéricas) de la última fila por estación
     latest_num = latest.copy()
@@ -211,19 +282,24 @@ def main(
 
             X_raw = pd.DataFrame([feats]).select_dtypes(include=["number"]).fillna(0.0)
 
-            # Normalizar nombres y reindexar contra TRAIN_COLS
-            X_raw.columns = pd.Index([str(c).strip().lower() for c in X_raw.columns])
-            train_cols_norm = [str(c).strip().lower() for c in TRAIN_COLS]
-            X = X_raw.reindex(columns=train_cols_norm, fill_value=0.0)
+            # --- Alineación estricta a EXPECTED_COLS (sin extras)
+            missing = [c for c in EXPECTED_COLS if c not in X_raw.columns]
+            for c in missing:
+                X_raw[c] = 0.0
+            extras = [c for c in X_raw.columns if c not in EXPECTED_COLS]
+            if extras:
+                X_raw = X_raw.drop(columns=extras)
+            X = X_raw[EXPECTED_COLS]
 
             if i == 0 and h == horizons[0]:
                 zero_cols = [c for c in X.columns if X[c].sum() == 0]
                 if zero_cols:
-                    print(f"[DEBUG] Columnas en 0 tras reindex: {zero_cols[:10]} ...")
+                    print(f"[DEBUG] Columnas en 0 tras alinear: {zero_cols[:10]} ...")
 
-            # Predicción puntual (+ IC simple si aplica)
-            yhat = float(model.predict(X)[0])
+            # Predicción (PyCaret-friendly si aplica)
+            yhat = float(predict_any(model, X)[0])
 
+            # IC rudimentario para ensambles (si aplica)
             yhat_lo = yhat_hi = None
             if hasattr(model, "estimators_") and isinstance(model.estimators_, list) and len(model.estimators_) > 1:
                 trees = np.array([t.predict(X)[0] for t in model.estimators_], dtype=float)
@@ -247,7 +323,7 @@ def main(
                 "yhat_hi": yhat_hi
             })
 
-            # Actualizar lags para la recursión
+            # Recursión de lags
             prev_lag1, prev_lag2 = y_lag1, y_lag2
             y_lag2 = prev_lag1
             y_lag1 = yhat
@@ -260,15 +336,23 @@ def main(
                .sort_values([id_col, "timestamp_pred", "h"])
                .reset_index(drop=True))
 
-    # --- Nombre de salida idempotente (incluye asof y freq)
+    # --- Nombre de salida idempotente (incluye asof y freq) + latest.parquet
     base = os.path.splitext(os.path.basename(outfile))[0]
     ext  = os.path.splitext(outfile)[1] or ".parquet"
     asof_tag = pd.to_datetime(asof_ts).strftime("%Y%m%d_%H%M")
     out_name = f"{base}__asof{asof_tag}__f{freq_minutes}m.parquet"
     out_path = os.path.join(out_dir, out_name)
 
+    os.makedirs(out_dir, exist_ok=True)
     df_pred.to_parquet(out_path, index=False)
+
+    latest_link = os.path.join(out_dir, "latest.parquet")
+    tmp = latest_link + ".tmp"
+    df_pred.to_parquet(tmp, index=False)
+    os.replace(tmp, latest_link)
+
     print(f"[OK] Predicciones guardadas en: {out_path}")
+    print(f"[OK] Enlace actualizado: {latest_link}")
     print(f"[INFO] filas={len(df_pred)}  estaciones={df_pred[id_col].nunique()}  "
           f"horizontes={sorted(df_pred['h'].unique().tolist())}")
     print(df_pred.head(10))

@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
-from pycaret.regression import setup, compare_models, finalize_model, save_model, predict_model, pull
+from pycaret.regression import setup, compare_models, finalize_model, save_model, predict_model, pull, tune_model
 import mlflow
 
 # ----------------------------- utils (mismas que predict_batch.py) -----------------------------
@@ -74,6 +74,36 @@ def make_numeric_dataset(df: pd.DataFrame, y_col: str, id_col: str, ts_col: str)
     drop_cols = [c for c in [y_col, id_col, ts_col] if c in df.columns]
     X = df.drop(columns=drop_cols, errors="ignore")
     X = make_numeric_features(X)
+
+    # ---------------------- 🔒 Anti-leak guard ----------------------
+    # 1) Remover columnas cuyo nombre contenga el nombre del target
+    name_leaks = [c for c in X.columns if y_col.lower() in c.lower()]
+    if name_leaks:
+        X = X.drop(columns=name_leaks, errors="ignore")
+
+    # 2) Remover columnas idénticas al target
+    y_vals = pd.to_numeric(df[y_col], errors="coerce")
+    equal_leaks = []
+    for c in X.columns:
+        xc = pd.to_numeric(X[c], errors="coerce")
+        if (xc.fillna(-9.999e9).values == y_vals.fillna(-9.999e9).values).all():
+            equal_leaks.append(c)
+    if equal_leaks:
+        X = X.drop(columns=equal_leaks, errors="ignore")
+
+    # 3) Remover columnas con correlación perfecta (±1) con el target
+    try:
+        numX = X.select_dtypes(include=["number"]).fillna(0.0)
+        if not numX.empty:
+            corr = np.corrcoef(numX.values.T, y_vals.fillna(0.0).values)[-1, :-1]
+            perfect_corr = [col for col, r in zip(numX.columns, corr)
+                            if np.isfinite(r) and abs(r) > 0.999999]
+            if perfect_corr:
+                X = X.drop(columns=perfect_corr, errors="ignore")
+    except Exception:
+        pass
+    # -------------------- fin 🔒 Anti-leak guard --------------------
+
     data_num = df[[y_col]].join(X)
     return data_num
 
@@ -115,7 +145,7 @@ def main(args):
     data_te = make_numeric_dataset(df_te, Y_COL, ID_COL, TS_COL) if not df_te.empty else pd.DataFrame()
 
     # --- Setup (validación temporal)
-    s = setup(
+    _ = setup(
         data=data_tr,
         target=Y_COL,
         session_id=args.seed,
@@ -131,14 +161,26 @@ def main(args):
         verbose=False,
     )
 
-    # --- AutoML PyCaret
+    # --- AutoML PyCaret: selección y tabla de comparación
     best = compare_models(sort=args.metric)
+    # Guardar la tabla de compare_models ANTES del tuning
     try:
         compare_results = pull().copy()
         compare_results.to_csv(os.path.join(args.reports, "pycaret_compare_results.csv"), index=False)
     except Exception:
         compare_results = None
 
+    # --- Tuning FORZADO del mejor modelo (siempre)
+    print("[INFO] Ejecutando tuning automático (forzado)")
+    tuned = tune_model(
+        best,
+        optimize=args.metric,     # usa la métrica de CLI (p.ej., RMSE)
+        choose_better=True,       # si no mejora, mantiene el original
+        n_iter=args.tune_iters    # presupuesto de búsqueda configurable
+    )
+    best = tuned
+
+    # --- Finalizar (refit sobre todo el training interno de PyCaret)
     best_final = finalize_model(best)
 
     # --- Guardar modelo
@@ -157,8 +199,15 @@ def main(args):
     append_metrics_csv(metrics_path, rows)
 
     # --- MLflow logging
-    
     with mlflow.start_run(run_name="pycaret_automl_final", nested=True):
+        # Tags útiles para auditar runs (forzamos tuning=True)
+        mlflow.set_tag("framework", "pycaret")
+        mlflow.set_tag("tuning_enabled", "True")
+        mlflow.set_tag("tune_iters", int(args.tune_iters))
+        mlflow.set_tag("metric_sort", args.metric)
+        mlflow.set_tag("folds", args.folds)
+
+        # Params/Metrics/Artifacts
         mlflow.log_param("folds", args.folds)
         mlflow.log_param("metric_sort", args.metric)
         mlflow.log_param("seed", args.seed)
@@ -196,5 +245,8 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--mlflow-uri", dest="mlflow_uri", default="mlruns")
     ap.add_argument("--experiment", default="ecobici_pycaret_automl")
+    # ---- Flags: dejamos --tune/-iters por compatibilidad, pero tuning siempre corre
+    ap.add_argument("--tune", action="store_true", help="(Ignorado: tuning siempre activado)")
+    ap.add_argument("--tune-iters", type=int, default=50, help="Iteraciones para tune_model (default 50)")
     args = ap.parse_args()
     main(args)

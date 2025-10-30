@@ -11,22 +11,17 @@ project:
 runtime:
   use_gpu: false
   log_level: "INFO"
-  mlflow_tracking_uri: "mlruns"     # carpeta local
+  mlflow_tracking_uri: "mlruns"
 
 paths:
-  # === Datos ===
   raw_dir: "data/raw"
-  features_in: "data/raw/status_clean.parquet"          # entrada para prepare_features
+  features_in: "data/raw/status_clean.parquet"
   curated_file: "data/curated/ecobici_model_ready.parquet"
   stations_file: "data/curated/station_information.parquet"
-
-  # === Splits (si se usan) ===
   splits_dir: "data/splits"
   train_split: "data/splits/train.parquet"
   val_split: "data/splits/val.parquet"
   test_split: "data/splits/test.parquet"
-
-  # === Artefactos y salidas ===
   models_dir: "models"
   mlruns_dir: "mlruns"
   predictions_dir: "predictions"
@@ -35,12 +30,11 @@ paths:
   logs_dir: "reports/logs"
 
 data:
-  target: "num_bikes_available"     # variable objetivo
+  target: "num_bikes_available"
   id_col: "station_id"
   ts_col: "ts_local"
 
 training:
-  framework: "pycaret"              # opciones: "pycaret" o "flaml"
   metric: "RMSE"
   optimize: true
   random_state: 42
@@ -51,15 +45,31 @@ backtest:
 
 inference:
   horizons: [1, 3, 6, 12]
-  asof: "2025-10-26 18:00:00"      # referencia temporal para predicción batch
+  asof: "2025-10-26 18:00:00"
 
 registry:
   compare_metric: "RMSE"
   promote_if_better: true
-  champion_path: "models/Champion/best_model.pkl"   # 👈 apunta al archivo real que ya tenés
+  champion_path: "models/Champion/best_model.pkl"
 
 pycaret:
   experiment_name: "ecobici_pycaret"
 
 flaml:
   time_budget_sec: 600
+  refine_time_sec: 120
+  experiment: "ecobici_automl_flaml"
+
+automl:
+  framework: "both"        # pycaret | flaml | both
+  tune: true               # (solo PyCaret)
+  tune_iters: 50
+  metric: "RMSE"
+  folds: 3
+
+retrain:
+  mode: "curated"          # trainval | curated
+
+prediction_mode: "slots"
+slots: ["09:00","13:00","16:00","20:00"]
+lead_minutes: 10 

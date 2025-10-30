@@ -48,12 +48,17 @@ def step_train_pycaret():
     y         = CFG["data"]["target"]
     sid       = CFG["data"]["id_col"]
     ts        = CFG["data"]["ts_col"]
-    metric    = CFG["training"]["metric"]
+
+    auto_cfg  = CFG.get("automl", {})
+    metric    = auto_cfg.get("metric", CFG["training"]["metric"])
+    folds     = str(auto_cfg.get("folds", 3))
+    tune      = bool(auto_cfg.get("tune", False))
+    tune_it   = int(auto_cfg.get("tune_iters", 50))
+
     seed      = str(CFG["training"]["random_state"])
     mlflowuri = CFG["runtime"]["mlflow_tracking_uri"]
     expname   = CFG.get("pycaret", {}).get("experiment_name", "ecobici_pycaret")
 
-    folds = str(CFG["training"].get("folds", 3))
     outdir = ROOT / models_dir / "03A_pycaret"
 
     cmd = [
@@ -65,6 +70,9 @@ def step_train_pycaret():
         "--metric", metric, "--seed", seed,
         "--mlflow-uri", mlflowuri, "--experiment", expname,
     ]
+    if tune:
+        cmd += ["--tune", "--tune-iters", str(tune_it)]
+
     return sh(cmd)
 
 # ----------------------------
@@ -83,11 +91,14 @@ def step_train_flaml():
     y         = CFG["data"]["target"]
     sid       = CFG["data"]["id_col"]
     ts        = CFG["data"]["ts_col"]
-    metric    = CFG["training"]["metric"]
-    seed      = str(CFG["training"]["random_state"])
-    mlflowuri = CFG["runtime"]["mlflow_tracking_uri"]
-    expname   = CFG.get("flaml", {}).get("experiment", "ecobici_flaml")
-    time_budget = str(CFG.get("flaml", {}).get("time_budget_sec", 600))
+
+    flaml_cfg  = CFG.get("flaml", {})
+    time_budget = int(flaml_cfg.get("time_budget_sec", 600))
+    refine_time = int(flaml_cfg.get("refine_time_sec", 0))
+    metric      = CFG["automl"].get("metric", "RMSE")
+    seed        = int(CFG["training"]["random_state"])
+    mlflowuri   = CFG["runtime"]["mlflow_tracking_uri"]
+    expname     = flaml_cfg.get("experiment", "ecobici_automl_flaml")
 
     outdir = ROOT / models_dir / "06_flaml"
 
@@ -96,11 +107,34 @@ def step_train_flaml():
         "--train", train_p, "--val", val_p, "--test", test_p,
         "--outdir", outdir, "--reports", reports,
         "--y", y, "--id", sid, "--ts", ts,
-        "--time-budget", time_budget,
-        "--metric", metric, "--seed", seed,
+        "--time-budget", str(time_budget),
+        "--refine-time", str(refine_time),
+        "--metric", metric, "--seed", str(seed),
         "--mlflow-uri", mlflowuri, "--experiment", expname,
     ]
     return sh(cmd)
+
+# ----------------------------
+# Selección automática del framework (PyCaret / FLAML)
+# ----------------------------
+
+def step_train():
+    fw = str(CFG["automl"].get("framework", "pycaret")).lower()
+    if fw == "pycaret":
+        return step_train_pycaret()
+    elif fw == "flaml":
+        return step_train_flaml()
+    elif fw == "both":
+        rc = step_train_pycaret()
+        if rc != 0:
+            return rc
+        rc = step_train_flaml()
+        if rc != 0:
+            return rc
+        return 0
+    else:
+        print(f"[ERROR] framework no soportado: {fw}")
+        return 1
 
 # ----------------------------
 # 3) COMPARE & REGISTER (Champion + alias filesystem)
@@ -186,11 +220,157 @@ def step_predict_tiles():
     return sh(cmd_tiles)
 
 # ----------------------------
+# 4) RE-FIT DEL CHAMPION EN FULL DATA (train+val o curated)
+# ----------------------------
+def step_refit_champion():
+    """
+    - Detecta el framework ganador leyendo reports/automl_metrics_by_split.csv (split=val).
+    - Arma el dataset "full" según retrain.mode (trainval|curated).
+    - Reentrena con el framework correspondiente y SOBREESCRIBE:
+      models/Champion/best_model.pkl
+    """
+    import json, joblib
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+
+    reports = ROOT / CFG["paths"]["reports_dir"]
+    metrics_csv = reports / "automl_metrics_by_split.csv"
+    assert metrics_csv.exists(), f"No existe {metrics_csv}; corré train/promote antes."
+
+    # --- 0) Elegir framework ganador por val_rmse (menor es mejor)
+    m = pd.read_csv(metrics_csv)
+    m = m[m["split"] == "val"]
+    m = m.sort_values("rmse", ascending=True)
+    assert not m.empty, "No hay filas VAL en automl_metrics_by_split.csv"
+    winner_framework = str(m.iloc[0]["framework"]).lower()
+    print(f"[INFO] Champion framework (por val_rmse): {winner_framework}")
+
+    # --- 1) Datos FULL según config
+    mode   = str(CFG.get("retrain", {}).get("mode", "trainval")).lower()
+    y_col  = CFG["data"]["target"]
+    id_col = CFG["data"]["id_col"]
+    ts_col = CFG["data"]["ts_col"]
+
+    def _load_full_df():
+        if mode == "curated":
+            return pd.read_parquet(ROOT / CFG["paths"]["curated_file"])
+        else:  # trainval
+            dtr = pd.read_parquet(ROOT / CFG["paths"]["train_split"])
+            dva = pd.read_parquet(ROOT / CFG["paths"]["val_split"])
+            return pd.concat([dtr, dva], ignore_index=True)
+
+    df_full = _load_full_df()
+    assert not df_full.empty, "df_full vacío en refit"
+
+    # --- 2) Helpers de preprocesado NUM-only + orden temporal
+    def _to_numeric_dataset(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        if ts_col in df.columns:
+            df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
+            df = df.dropna(subset=[ts_col]).sort_values(ts_col).reset_index(drop=True)
+        df[y_col] = pd.to_numeric(df[y_col], errors="coerce")
+
+        drop_cols = [c for c in [y_col, id_col, ts_col] if c in df.columns]
+        X = df.drop(columns=drop_cols, errors="ignore")
+        X = X.select_dtypes(include=["number"]).fillna(0.0)
+        return df[[y_col]].join(X)
+
+    def _to_Xy_numeric(df: pd.DataFrame):
+        df = df.copy()
+        if ts_col in df.columns:
+            df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
+            df = df.dropna(subset=[ts_col]).sort_values(ts_col).reset_index(drop=True)
+        y = pd.to_numeric(df[y_col], errors="coerce").astype(float).values
+        X = df.drop(columns=[c for c in [y_col, id_col, ts_col] if c in df.columns], errors="ignore")
+        X = X.select_dtypes(include=["number"]).fillna(0.0)
+        return X, y
+
+    out_dir = ROOT / "models" / "Champion"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    alias_path = out_dir / "best_model.pkl"  # <- alias estable que usa predict
+
+    # --- 3) Reentrenar según framework
+    if winner_framework == "pycaret":
+        from pycaret.regression import setup, load_model, finalize_model, save_model
+
+        data_full = _to_numeric_dataset(df_full)
+
+        # Setup consistente (timeseries, sin shuffle)
+        _ = setup(
+            data=data_full,
+            target=y_col,
+            session_id=CFG["training"]["random_state"],
+            fold_strategy="timeseries",
+            fold=int(CFG["automl"].get("folds", 3)),
+            data_split_shuffle=False,
+            fold_shuffle=False,
+            html=False,
+            verbose=False,
+            log_experiment=False,
+        )
+
+        # Cargar el modelo PyCaret ganador original:
+        # Usamos el modelo guardado por PyCaret (con save_model) si existe;
+        # si el Champion actual es una copia, igual es legible por load_model(strip .pkl).
+        champ_file = ROOT / CFG["registry"]["champion_path"]
+        base = str(champ_file).replace(".pkl", "")
+        try:
+            model = load_model(base)
+        except Exception:
+            # Fallback: si no fue guardado con save_model(), probamos joblib.load para estimador compatible
+            model = joblib.load(champ_file)
+
+        final = finalize_model(model)  # entrena en TODO el data_full del setup
+        base_out = out_dir / "best_model_refit"
+        save_model(final, str(base_out))  # PyCaret agrega ".pkl"
+        # mover/renombrar como alias estable
+        dst = out_dir / "best_model.pkl"
+        if dst.exists():
+            dst.unlink()
+        os.replace(str(base_out) + ".pkl", dst)
+        print(f"[OK] Refit Champion (PyCaret) → {dst}")
+        return 0
+
+    elif winner_framework == "flaml":
+        from sklearn.base import clone
+        from flaml import AutoML
+
+        Xf, yf = _to_Xy_numeric(df_full)
+
+        # Cargamos el objeto AutoML campeón, clonamos su estimador y lo reentrenamos
+        champ_file = ROOT / CFG["registry"]["champion_path"]
+        automl = joblib.load(champ_file)
+
+        # Intento 1: clonar estimador y setear best_config
+        est = automl.model.estimator
+        try:
+            est2 = clone(est)
+        except Exception:
+            est2 = est.__class__()  # fallback
+
+        # Filtramos hyperparams compatibles
+        try:
+            valid_keys = set(est2.get_params().keys())
+            best_cfg = {k: v for k, v in automl.best_config.items() if k in valid_keys}
+            est2.set_params(**best_cfg)
+        except Exception:
+            pass
+
+        est2.fit(Xf, yf)
+        joblib.dump(est2, alias_path)
+        print(f"[OK] Refit Champion (FLAML) → {alias_path}")
+        return 0
+
+    else:
+        print(f"[WARN] Framework no reconocido para refit: {winner_framework}")
+        return 0
+
+# ----------------------------
 # MAIN
 # ----------------------------
 if __name__ == "__main__":
     import argparse
-    from pathlib import Path as _P
 
     ap = argparse.ArgumentParser(description="Runner Ecobici-AutoML")
     ap.add_argument("--mode", choices=["all", "train", "promote", "predict"],
@@ -219,10 +399,11 @@ if __name__ == "__main__":
         return champ
 
     if args.mode == "all":
-        print("▶ 1/4 prepare");   rc=step_prepare();      assert rc==0, "prepare_features falló"
-        print("▶ 2/4 train");     rc=step_train();        assert rc==0, "train falló"
-        print("▶ 3/4 promote");   rc=step_promote();      assert rc==0, "compare_register falló"
-        print("▶ 4/4 predict");   rc=step_predict_tiles();assert rc==0, "predict/tiles falló"
+        print("▶ 1/5 prepare");   rc=step_prepare();         assert rc==0, "prepare_features falló"
+        print("▶ 2/5 train");     rc=step_train();           assert rc==0, "train falló"
+        print("▶ 3/5 promote");   rc=step_promote();         assert rc==0, "compare_register falló"
+        print("▶ 4/5 refit");     rc=step_refit_champion();  assert rc==0, "refit falló"
+        print("▶ 5/5 predict");   rc=step_predict_tiles();   assert rc==0, "predict/tiles falló"
 
     elif args.mode == "train":
         print("▶ prepare");       rc=step_prepare();      assert rc==0

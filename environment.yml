@@ -18,6 +18,8 @@ dependencies:
   - graphviz
   - python-graphviz
   - streamlit
+  - folium=0.20.0
+  - streamlit-folium
   - pip:
       - pycaret==3.3.2
       - flaml==2.1.1
