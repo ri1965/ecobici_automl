@@ -356,7 +356,12 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
     # === Botón CSV (render EN la sidebar debajo del slider) ===
     with csv_box:
         st.markdown("**Exportar CSV – Top-5 vecinas de estaciones rojas**")
-        rojas = df_map[df_map["_semaforo_label"] == "rojo"].copy()
+
+        # 1) Solo usamos el df del slot/horario actual, como el Top-5
+        df_base = df_map.copy()
+
+        # 2) Estaciones rojas (origen para el CSV)
+        rojas = df_base[df_base["_semaforo_label"] == "rojo"].copy()
 
         if rojas.empty:
             st.caption("No hay estaciones rojas dentro del conjunto actual.")
@@ -366,23 +371,26 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
                 lat_r, lon_r = float(r0["lat"]), float(r0["lon"])
                 id_r, name_r = int(r0["station_id"]), r0["name"]
 
-                df_tmp = df_map.copy()
+                # 3) Vecinas: **mismo filtro que el Top-5** → solo verde/amarillo, distinto id y dentro del radio
+                df_tmp = df_base.copy()
                 df_tmp["distance_m"] = haversine_m(lat_r, lon_r, df_tmp["lat"].values, df_tmp["lon"].values)
-                df_tmp = (
-                    df_tmp[(df_tmp["station_id"] != id_r) & (df_tmp["distance_m"] <= radius_m)]
-                    .sort_values("distance_m")
-                    .head(5)
-                )
+                df_tmp = df_tmp[
+                    (df_tmp["_semaforo_label"].isin(["verde", "amarillo"])) &
+                    (df_tmp["station_id"] != id_r) &
+                    (df_tmp["distance_m"] <= radius_m)
+                ].sort_values("distance_m").head(5)
+
+                # 4) Armado de filas (mismos redondeos que el Top-5)
                 for _, n in df_tmp.iterrows():
                     export_rows.append({
                         "estacion_roja_id": id_r,
                         "estacion_roja_nombre": name_r,
                         "vecina_id": int(n["station_id"]),
                         "vecina_nombre": n["name"],
-                        "distancia_m": round(float(n["distance_m"]), 0),
-                        "bicis_pred": float(n["yhat"]) if pd.notna(n["yhat"]) else None,
-                        "docks_pred": float(n["_docks_pred"]) if pd.notna(n["_docks_pred"]) else None,
-                        "pct_bicis": float(n["_pct_bikes"]) if pd.notna(n["_pct_bikes"]) else None,
+                        "distancia_m": int(round(float(n["distance_m"]), 0)),
+                        "bicis_pred": int(round(float(n["yhat"])) if pd.notna(n["yhat"]) else 0),
+                        "docks_pred": int(round(float(n["_docks_pred"])) if pd.notna(n["_docks_pred"]) else 0),
+                        "pct_bicis": round(float(n["_pct_bikes"]) if pd.notna(n["_pct_bikes"]) else 0.0, 1),
                         "semaforo": n["_semaforo_label"],
                         "horario_prediccion": slot_sel if has_slots else None,
                         "horizonte_h": h_sel if (not has_slots) else None,
@@ -403,7 +411,6 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
                     mime="text/csv",
                     use_container_width=True,
                 )
-
     # -------- Tarjeta de datos de la Estación Foco (en el cuerpo) --------
     focus_row_full = df_map[df_map["station_id"] == id0].copy()
     if not focus_row_full.empty:
