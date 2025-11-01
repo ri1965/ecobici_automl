@@ -1,3 +1,4 @@
+# app/dashboard/main.py
 from __future__ import annotations
 import pandas as pd
 import numpy as np
@@ -26,15 +27,15 @@ st.title("🚲 Ecobici AutoML — Predicción de Disponibilidad")
 st.markdown("""
 <style>
 section[data-testid="stSidebar"] div.stSidebarContent {
-    padding-top: 0rem !important;       /* elimina casi todo el margen superior */
+    padding-top: 0rem !important;
     padding-bottom: 0.3rem !important;
 }
 section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
-    margin-top: 0.4rem !important;      /* títulos más compactos */
+    margin-top: 0.4rem !important;
     margin-bottom: 0.3rem !important;
 }
-div[data-testid="stSidebarNav"] { 
-    display: none !important;           /* oculta la pequeña franja de título vacía */
+div[data-testid="stSidebarNav"] {
+    display: none !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -42,11 +43,11 @@ div[data-testid="stSidebarNav"] {
 # CSS: reducir tamaño de métricas solo en la mini ficha del sidebar
 st.markdown("""
 <style>
-.mini-ficha div[data-testid="stMetric"] label { 
-    font-size: 0.80rem !important;   /* etiqueta más chica */
+.mini-ficha div[data-testid="stMetric"] label {
+    font-size: 0.80rem !important;
 }
-.mini-ficha div[data-testid="stMetricValue"] { 
-    font-size: 1.20rem !important;   /* valor ~35-40% más chico */
+.mini-ficha div[data-testid="stMetricValue"] {
+    font-size: 1.20rem !important;
     line-height: 1.0 !important;
 }
 </style>
@@ -60,10 +61,14 @@ def _infer_capacity_cols(df: pd.DataFrame) -> pd.Series:
     return pd.Series([pd.NA] * len(df), index=df.index)
 
 def _color_and_label(pct):
-    if pd.isna(pct):  return [160,160,160], "gris"
-    if pct >= 50:     return [0,180,0], "verde"
-    if pct >= 11:     return [240,200,0], "amarillo"
-    return [220,0,0], "rojo"
+    """Devuelve color RGB y etiqueta según % de bicis disponibles."""
+    if pd.isna(pct):
+        return [160,160,160], "gris"          # sin dato
+    if pct == 0:
+        return [220,0,0], "rojo"              # sin bicis
+    if 0 < pct < 50:
+        return [240,200,0], "amarillo"        # menos de 50%
+    return [0,180,0], "verde"                 # 50% o más
 
 def haversine_m(lat1, lon1, lat2, lon2):
     R = 6371000.0
@@ -90,6 +95,15 @@ def _int0(x) -> int:
     except Exception:
         return 0
 
+# Normalizador de hora a 'HH:MM'
+def _norm_slot(v: str) -> str:
+    s = str(v)
+    if len(s) == 8 and s.count(":") == 2:  # 'HH:MM:SS' -> 'HH:MM'
+        s = s[:5]
+    if len(s) == 4 and s.count(":") == 1:  # 'H:MM' -> 'HH:MM'
+        s = "0" + s
+    return s
+
 # ----------------- datos base -----------------
 preds = load_predictions()
 stations = load_stations()
@@ -111,21 +125,29 @@ if "generated_at" in preds.columns:
 st.sidebar.header("Filtros")
 
 # --- Slots (nuevo) o horizontes (compat) ---
-has_slots = ("slot_label" in preds.columns) and preds["slot_label"].notna().any()
-if has_slots:
-    slots_avail = preds["slot_label"].dropna().unique().tolist()
-    order_pref = ["09:00", "13:00", "16:00", "20:00"]
-    slots_sorted = [s for s in order_pref if s in slots_avail] + [s for s in slots_avail if s not in order_pref]
+SLOT_PREF = ["09:00", "13:00", "16:00", "20:00"]
 
-    # 1) Renombrado: Franja -> Horario de Predicción
+# Detectar columna de slot en orden de preferencia
+slot_candidates = [c for c in ["slot_label", "pred_time", "slot", "slot_time"] if c in preds.columns]
+slot_col = slot_candidates[0] if slot_candidates else None
+HAS_SLOTS = bool(slot_col) and preds[slot_col].notna().any()
+
+if HAS_SLOTS:
+    # Normalizar a 'HH:MM'
+    preds[slot_col] = preds[slot_col].map(_norm_slot)
+
+    # Opciones disponibles con preferencia 09/13/16/20
+    slots_avail = sorted(pd.unique(preds[slot_col].dropna()))
+    slots_sorted = [s for s in SLOT_PREF if s in slots_avail] + [s for s in slots_avail if s not in SLOT_PREF]
+
     slot_sel = st.sidebar.selectbox("Horario de Predicción", slots_sorted, index=0)
-    preds_h = preds[preds["slot_label"] == slot_sel].copy()
+    preds_h = preds[preds[slot_col] == slot_sel].copy()
     h_sel = None
     mode_label = f"Horario: {slot_sel}"
 
-    # 2) Radio de Búsqueda DEBAJO del horario  + contenedor CSV justo debajo
+    # Radio + contenedor CSV en sidebar
     radius_m = st.sidebar.slider("Radio de Búsqueda (m)", 200, 2000, 1000, step=100)
-    csv_box = st.sidebar.container()  # botón CSV va aquí, debajo del slider
+    csv_box = st.sidebar.container()
 
 else:
     has_h = ("h" in preds.columns) and preds["h"].notna().any()
@@ -134,16 +156,14 @@ else:
         h_sel = st.sidebar.selectbox("Horizonte (horas)", horizons, index=0)
         preds_h = preds[preds["h"] == h_sel].copy()
         mode_label = f"Horizonte: {h_sel} h"
-
-        radius_m = st.sidebar.slider("Radio de Búsqueda (m)", 200, 2000, 1000, step=100)
-        csv_box = st.sidebar.container()
     else:
-        st.sidebar.caption("No se encontró columna 'slot_label' ni 'h' en predicciones.")
+        st.sidebar.caption("No se encontró columna de slot ni de horizonte (h) en predicciones.")
         h_sel = None
         preds_h = preds.copy()
         mode_label = "Sin modo"
-        radius_m = st.sidebar.slider("Radio de Búsqueda (m)", 200, 2000, 1000, step=100)
-        csv_box = st.sidebar.container()
+
+    radius_m = st.sidebar.slider("Radio de Búsqueda (m)", 200, 2000, 1000, step=100)
+    csv_box = st.sidebar.container()
 
 # Estación foco + radio (para cercanas)
 st.sidebar.subheader("Estación foco (para cercanas)")
@@ -165,7 +185,6 @@ if "map_zoom" not in st.session_state:
     st.session_state["map_zoom"] = 13
 
 # --- SYNC PRE-WIDGET ---
-# Si venimos de un click, pedimos que el selectbox adopte el foco recién elegido
 if st.session_state.get("__sync_focus__") is True:
     try:
         current = next(
@@ -178,7 +197,6 @@ if st.session_state.get("__sync_focus__") is True:
     finally:
         st.session_state.pop("__sync_focus__", None)
 
-# Si no hay valor cargado aún (primera vez), setear desde el foco
 if "focus_row_sel" not in st.session_state and "station_focus_id" in st.session_state:
     try:
         current = next(
@@ -189,7 +207,6 @@ if "focus_row_sel" not in st.session_state and "station_focus_id" in st.session_
     except StopIteration:
         pass
 
-# Callback: cuando el usuario cambia el select, actualizar foco (y opcionalmente centrar)
 def _on_focus_change():
     sel = st.session_state.get("focus_row_sel")
     if sel:
@@ -371,7 +388,7 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
                 lat_r, lon_r = float(r0["lat"]), float(r0["lon"])
                 id_r, name_r = int(r0["station_id"]), r0["name"]
 
-                # 3) Vecinas: **mismo filtro que el Top-5** → solo verde/amarillo, distinto id y dentro del radio
+                # 3) Vecinas: mismo filtro que el Top-5
                 df_tmp = df_base.copy()
                 df_tmp["distance_m"] = haversine_m(lat_r, lon_r, df_tmp["lat"].values, df_tmp["lon"].values)
                 df_tmp = df_tmp[
@@ -380,7 +397,6 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
                     (df_tmp["distance_m"] <= radius_m)
                 ].sort_values("distance_m").head(5)
 
-                # 4) Armado de filas (mismos redondeos que el Top-5)
                 for _, n in df_tmp.iterrows():
                     export_rows.append({
                         "estacion_roja_id": id_r,
@@ -392,8 +408,8 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
                         "docks_pred": int(round(float(n["_docks_pred"])) if pd.notna(n["_docks_pred"]) else 0),
                         "pct_bicis": round(float(n["_pct_bikes"]) if pd.notna(n["_pct_bikes"]) else 0.0, 1),
                         "semaforo": n["_semaforo_label"],
-                        "horario_prediccion": slot_sel if has_slots else None,
-                        "horizonte_h": h_sel if (not has_slots) else None,
+                        "horario_prediccion": slot_sel if HAS_SLOTS else None,
+                        "horizonte_h": h_sel if (not HAS_SLOTS) else None,
                         "radio_m": radius_m,
                     })
 
@@ -401,7 +417,7 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
                 df_export = pd.DataFrame(export_rows)
                 fname = (
                     f"top5_vecinas_rojas_{str(slot_sel).replace(':','')}_{radius_m}m.csv"
-                    if has_slots else
+                    if HAS_SLOTS else
                     f"top5_vecinas_rojas_h{h_sel}_{radius_m}m.csv"
                 )
                 st.download_button(
@@ -411,6 +427,7 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
                     mime="text/csv",
                     use_container_width=True,
                 )
+
     # -------- Tarjeta de datos de la Estación Foco (en el cuerpo) --------
     focus_row_full = df_map[df_map["station_id"] == id0].copy()
     if not focus_row_full.empty:
@@ -425,7 +442,6 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
             c3.metric("Docks libres (pred.)", f"{_int0(row['_docks_pred'])}")
 
     # ----------------- FICHA COMPACTA EN SIDEBAR + TOP-5 -----------------
-    # 1) Ficha compacta de estación foco (en sidebar, arriba del Top-5)
     with near_box:
         st.markdown("**📍 Detalle Estación Foco**")
         focus_row_sidebar = df_map[df_map["station_id"] == id0]
@@ -461,7 +477,6 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
         if near.empty:
             st.caption("No hay estaciones verdes/amarillas dentro del radio seleccionado.")
         else:
-            # Seleccionar y renombrar columnas
             cols = ["name", "yhat", "_docks_pred", "_pct_bikes", "_semaforo_label", "distance_m"]
             out = near[cols].rename(columns={
                 "name": "Estación",
@@ -470,14 +485,11 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
                 "_pct_bikes": "% bicis",
                 "_semaforo_label": "Semáforo",
             })
-
-            # Redondear y formatear
             out["Bicis"] = out["Bicis"].round(0).astype("Int64")
             out["Docks libres"] = out["Docks libres"].round(0).astype("Int64")
             out["% bicis"] = out["% bicis"].round(1)
             out["Distancia (m)"] = out.pop("distance_m").round(0).astype("Int64")
 
-            # === estilo compacto ===
             st.markdown(
                 """
                 <style>
@@ -494,7 +506,6 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
                 """,
                 unsafe_allow_html=True
             )
-
             st.dataframe(
                 out,
                 use_container_width=True,
@@ -505,7 +516,7 @@ else:
     st.warning(
         "Para ver el mapa necesitás predicciones y estaciones.\n\n"
         "• Modo franjas: `predictions/slots/*/predictions.parquet` "
-        "(columnas: station_id, t_slot, slot_label, yhat)\n"
+        "(columnas: station_id, t_slot, slot_label|pred_time, yhat)\n"
         "• Modo horizonte: `predictions/*.parquet` con columna `h`\n"
         "• Estaciones: `data/curated/station_information.parquet`"
     )
