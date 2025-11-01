@@ -466,11 +466,18 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
     # 2) Top-5 cercanas (en sidebar, debajo de la ficha)
     near = df_map.copy()
     near["distance_m"] = haversine_m(lat0, lon0, near["lat"].values, near["lon"].values)
+
+    # Solo estaciones verdes o amarillas dentro del radio
     near = near[
-        (near["_semaforo_label"].isin(["verde","amarillo"])) &
+        (near["_semaforo_label"].isin(["verde", "amarillo"])) &
         (near["station_id"] != id0) &
         (near["distance_m"] <= radius_m)
-    ].sort_values("distance_m").head(5)
+    ].copy()
+
+    # Ordenar: primero verdes, luego amarillas, y dentro de cada color por cantidad de bicis (desc)
+    color_order = pd.Categorical(near["_semaforo_label"], categories=["verde", "amarillo"], ordered=True)
+    near = near.assign(_color_order=color_order)
+    near = near.sort_values(by=["_color_order", "yhat"], ascending=[True, False]).head(5)
 
     with near_box:
         st.markdown("**Top-5 cercanas con disponibilidad**")
