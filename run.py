@@ -5,6 +5,7 @@
 import sys, subprocess, time, yaml
 from pathlib import Path
 from datetime import datetime
+import os
 
 ROOT = Path(__file__).resolve().parent
 CFG  = yaml.safe_load(open(ROOT/"config/config.yaml"))
@@ -117,7 +118,6 @@ def step_train_flaml():
 # ----------------------------
 # Selección automática del framework (PyCaret / FLAML)
 # ----------------------------
-
 def step_train():
     fw = str(CFG["automl"].get("framework", "pycaret")).lower()
     if fw == "pycaret":
@@ -165,7 +165,7 @@ def step_promote():
         "--stage", stage,
         "--pycaret-model-path", str(pycaret_pkl),
     ]
-    if flaml_pkl.exists():
+    if (flaml_pkl).exists():
         cmd += ["--flaml-model-path", str(flaml_pkl)]
     cmd += ["--champion-path", str(champion)]
     return sh(cmd)
@@ -311,36 +311,38 @@ def step_refit_champion():
         )
 
         # Cargar el modelo PyCaret ganador original:
-        # Usamos el modelo guardado por PyCaret (con save_model) si existe;
-        # si el Champion actual es una copia, igual es legible por load_model(strip .pkl).
         champ_file = ROOT / CFG["registry"]["champion_path"]
         base = str(champ_file).replace(".pkl", "")
         try:
             model = load_model(base)
         except Exception:
-            # Fallback: si no fue guardado con save_model(), probamos joblib.load para estimador compatible
-            model = joblib.load(champ_file)
+            # Fallback: si no fue guardado con save_model(), probamos joblib.load
+            import joblib as _joblib
+            model = _joblib.load(champ_file)
 
         final = finalize_model(model)  # entrena en TODO el data_full del setup
         base_out = out_dir / "best_model_refit"
         save_model(final, str(base_out))  # PyCaret agrega ".pkl"
+
         # mover/renombrar como alias estable
         dst = out_dir / "best_model.pkl"
         if dst.exists():
             dst.unlink()
-        os.replace(str(base_out) + ".pkl", dst)
+        print(f"[REFIT] Promoviendo {str(base_out)+'.pkl'}  →  {str(dst)}")
+        os.replace(str(base_out) + ".pkl", str(dst))  # atómico
         print(f"[OK] Refit Champion (PyCaret) → {dst}")
         return 0
 
     elif winner_framework == "flaml":
         from sklearn.base import clone
         from flaml import AutoML
+        import joblib as _joblib
 
         Xf, yf = _to_Xy_numeric(df_full)
 
         # Cargamos el objeto AutoML campeón, clonamos su estimador y lo reentrenamos
         champ_file = ROOT / CFG["registry"]["champion_path"]
-        automl = joblib.load(champ_file)
+        automl = _joblib.load(champ_file)
 
         # Intento 1: clonar estimador y setear best_config
         est = automl.model.estimator
@@ -358,7 +360,7 @@ def step_refit_champion():
             pass
 
         est2.fit(Xf, yf)
-        joblib.dump(est2, alias_path)
+        _joblib.dump(est2, alias_path)
         print(f"[OK] Refit Champion (FLAML) → {alias_path}")
         return 0
 
@@ -373,7 +375,7 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="Runner Ecobici-AutoML")
-    ap.add_argument("--mode", choices=["all", "train", "promote", "predict"],
+    ap.add_argument("--mode", choices=["all", "train", "promote", "predict", "refit"],
                     default="all", help="Qué ejecutar")
     ap.add_argument("--retrain", action="store_true",
                     help="Forzar reentrenamiento (sólo útil en mode=train/all)")
@@ -417,5 +419,10 @@ if __name__ == "__main__":
         _ensure_curated()
         _ensure_champion()
         print("▶ predict");       rc=step_predict_tiles();assert rc==0
+
+    elif args.mode == "refit":
+        _ensure_curated()
+        _ensure_champion()
+        print("▶ refit");         rc=step_refit_champion(); assert rc==0
 
     print(f"✅ Listo en {round(time.time()-t0,2)}s")
