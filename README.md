@@ -1,10 +1,3 @@
-Perfecto 🚴‍♂️💨
-Acá tenés la versión definitiva del README.md lista para reemplazar el de la raíz.
-Incluye una portada visual profesional, íconos y estructura limpia para que en GitHub se vea impecable.
-
-⸻
-
-
 # 🚴‍♂️ Ecobici-AutoML Dashboard  
 > Predicción horaria de disponibilidad de bicicletas (Buenos Aires)  
 > *PyCaret + FLAML + MLflow + Streamlit — Versión v1.0 (Etapa 8 consolidada)*  
@@ -171,28 +164,9 @@ make clean	Limpieza ligera de artefactos locales
 
 🧠 Créditos y versión
 	•	Proyecto desarrollado como Trabajo Práctico Final – Fundamentos de Aprendizaje Automático (Maestría en Ciencia de Datos, Univ. Austral)
-	•	Autor: Roberto Inza
-	•	Versión: v1.0 Estable (Etapa 8 consolidada)
-	•	Fecha: Octubre 2025
+	•	Autor: Adrián Firpo - Roberto Inza - Juan Manuel Lucero - Nicolás Souto
+	•	Fecha: Noviembre 2025
 
 ⸻
 
 
-<p align="center">
-  <sub>🚲 Predicción inteligente de disponibilidad Ecobici | PyCaret · FLAML · MLflow · Streamlit · 2025 </sub>
-</p>
-```
-
-
-
-⸻
-
-💡 Sugerencia:
-Antes de hacer el git commit, abrilo en VS Code con vista Markdown (⌘ Shift V) para verificar formato.
-Después:
-
-git add README.md
-git commit -m "✨ README visual actualizado (portada + guía completa v1.0)"
-git push origin main
-
-¿Querés que te deje también la versión reducida (tipo README-lite.md) solo para usuarios que quieran correrlo rápido sin contexto académico?
