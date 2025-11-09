@@ -29,10 +29,22 @@ def _infer_capacity_cols(df: pd.DataFrame) -> pd.Series:
             return pd.to_numeric(df[c], errors="coerce")
     return pd.Series([pd.NA] * len(df), index=df.index)
 
-def _color_and_label(pct):
-    if pd.isna(pct):  return [160,160,160], "gris"
-    if pct >= 50:     return [0,180,0], "verde"
-    if pct >= 11:     return [240,200,0], "amarillo"
+# ✅ Semáforo: rojo=0 bici, amarillo <50%, verde >=50%
+def _color_and_label(pct, bikes):
+    if pd.isna(pct):             return [160,160,160], "gris"
+    try:
+        b = float(bikes) if bikes is not None else np.nan
+    except Exception:
+        b = np.nan
+    # Rojo: 0 bicis (o negativo por predicción)
+    if pd.notna(b) and b <= 0:
+        return [220,0,0], "rojo"
+    # Verde / Amarillo por % de bicis
+    if pct >= 50:
+        return [0,180,0], "verde"
+    if pct > 0:
+        return [240,200,0], "amarillo"
+    # Si % es 0 y no pudimos evaluar bikes, consideramos rojo
     return [220,0,0], "rojo"
 
 def haversine_m(lat1, lon1, lat2, lon2):
@@ -52,6 +64,9 @@ def _hex_from_label(label: str) -> str:
         "rojo":    "#e74c3c",
         "gris":    "#95a5a6",
     }.get(label, "#95a5a6")
+
+def _sanitize_for_fname(s: str) -> str:
+    return "".join(ch for ch in str(s) if ch.isalnum() or ch in ("-", "_"))
 
 # ----------------- datos base -----------------
 preds = load_predictions()
@@ -202,8 +217,11 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
         if col in df_map.columns:
             df_map[col] = df_map[col].round(1)
 
-    # Color semáforo
-    df_map["color"], df_map["_semaforo_label"] = zip(*df_map["_pct_bikes"].apply(_color_and_label))
+    # ✅ Color semáforo (usa % y cantidad de bicis)
+    df_map["color"], df_map["_semaforo_label"] = zip(*df_map.apply(
+        lambda r: _color_and_label(r.get("_pct_bikes"), r.get("yhat")),
+        axis=1
+    ))
 
     # === Foco vigente a partir del session_state ===
     try:
@@ -252,7 +270,7 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
         radius=10, color="#00FFFF", fill=False, weight=3
     ).add_to(m)
 
-    # halos verdes para cercanas (respecto al foco)
+    # halos verdes/amarillos para cercanas (respecto al foco)
     near_for_layer = df_map.copy()
     near_for_layer["distance_m"] = haversine_m(lat0, lon0, near_for_layer["lat"].values, near_for_layer["lon"].values)
     near_for_layer = near_for_layer[
@@ -271,16 +289,16 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
             opacity=0.7
         ).add_to(m)
 
-    # --- RENDER Folium con ancho del contenedor y key dinámico (evita “mapa por la mitad”) ---
+    # --- RENDER Folium con ancho del contenedor y key dinámico ---
     map_state = st_folium(
         m,
         height=620,
-        use_container_width=True,  # no está deprecado en st_folium
+        use_container_width=True,
         key=f"map_clickable_{st.session_state.get('station_focus_id')}_{st.session_state.get('map_zoom', 13)}",
         returned_objects=["last_clicked", "center", "zoom"]
     )
 
-    # Guardar siempre la vista actual (para no perder zoom/centro)
+    # Guardar vista actual
     try:
         if "center" in map_state and map_state["center"]:
             st.session_state["map_center"] = [map_state["center"]["lat"], map_state["center"]["lng"]]
@@ -296,38 +314,51 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
         d = haversine_m(_lat, _lon, df_map["lat"].values, df_map["lon"].values)
         idx = int(np.argmin(d))
         new_focus = df_map.iloc[idx]
-
-        # (opcional) snap: ignorar clicks lejos de estaciones
-        # if float(d[idx]) > 80: st.stop()
-
-        # 1) foco por id (para tu lógica downstream)
         st.session_state["station_focus_id"] = int(new_focus["station_id"])
-
-        # 2) marcar sincronización para el próximo render (pre-widget)
         st.session_state["__sync_focus__"] = True
-
-        # 3) mantener vista si lock_view, o recentrar si no
         if not lock_view:
             st.session_state["map_center"] = [float(new_focus["lat"]), float(new_focus["lon"])]
             st.session_state["map_zoom"] = 14
-
         st.rerun()
+
+    # ----------------- 📍 Detalle Estación Foco (SIDEBAR) -----------------
+    if "station_focus_id" in st.session_state and not stations.empty:
+        focus_info = stations.loc[stations["station_id"] == st.session_state["station_focus_id"]]
+        if not focus_info.empty:
+            st.sidebar.markdown("### 📍 Detalle Estación Foco")
+            row_focus = df_map[df_map["station_id"] == st.session_state["station_focus_id"]]
+            if not row_focus.empty:
+                foco_data = row_focus.iloc[0]
+                st.sidebar.caption(f"{mode_label} — {foco_data.get('_semaforo_label','')}")
+                c1, c2, c3 = st.sidebar.columns(3)
+                c1.metric("Cap.", int(foco_data.get("_capacity", 0)))
+                c2.metric("Bicis", int(foco_data.get("yhat", 0)))
+                c3.metric("Docks libres", int(foco_data.get("_docks_pred", 0)))
+                pct = foco_data.get("_pct_bikes", 0)
+                try:
+                    st.sidebar.progress(min(max(float(pct)/100, 0), 1), text=f"{pct:.1f}% bicis")
+                except Exception:
+                    pass
+            st.sidebar.divider()
 
     # ----------------- Top-5 cercanas EN EL SIDEBAR -----------------
     near = df_map.copy()
     near["distance_m"] = haversine_m(lat0, lon0, near["lat"].values, near["lon"].values)
+    # Filtro: semáforo con disponibilidad, dentro del radio y excluyendo foco
     near = near[
-        (near["_semaforo_label"].isin(["verde","amarillo"])) &
+        (near["_semaforo_label"].isin(["verde", "amarillo"])) &
         (near["station_id"] != id0) &
         (near["distance_m"] <= radius_m)
-    ].sort_values("distance_m").head(5)
+    ].copy()
+
+    # ✅ Orden: Bicis (desc) y, a igualdad, Distancia (asc)
+    near = near.sort_values(by=["yhat", "distance_m"], ascending=[False, True]).head(5)
 
     with near_box:
-        st.markdown("**Top-5 cercanas con disponibilidad**")
+        st.markdown("**Top-5 cercanas con disponibilidad** _(orden: Bicis ↓, Distancia ↑)_")
         if near.empty:
             st.caption("No hay estaciones verdes/amarillas dentro del radio seleccionado.")
         else:
-            # Seleccionar y renombrar columnas
             cols = ["name", "yhat", "_docks_pred", "_pct_bikes", "_semaforo_label", "distance_m"]
             out = near[cols].rename(columns={
                 "name": "Estación",
@@ -337,34 +368,22 @@ if not preds_h.empty and not stations.empty and {"station_id","lat","lon"}.issub
                 "_semaforo_label": "Semáforo",
             })
 
-            # Redondear y formatear
+            # Redondeos para presentación
             out["Bicis"] = out["Bicis"].round(0).astype("Int64")
             out["Docks libres"] = out["Docks libres"].round(0).astype("Int64")
             out["% bicis"] = out["% bicis"].round(1)
             out["Distancia (m)"] = out.pop("distance_m").round(0).astype("Int64")
 
-            # === estilo compacto ===
-            st.markdown(
-                """
-                <style>
-                .small-table td, .small-table th {
-                    font-size: 13px !important;
-                    padding: 4px 6px !important;
-                    text-align: center !important;
-                    white-space: nowrap;
-                }
-                .small-table table {
-                    width: 100% !important;
-                }
-                </style>
-                """,
-                unsafe_allow_html=True
-            )
+            st.dataframe(out, use_container_width=True, hide_index=True)
 
-            st.dataframe(
-                out.style.set_table_attributes('class="small-table"'),
-                width='content',
-                hide_index=True
+            # --- Descarga CSV (mismo orden mostrado) ---
+            suffix = _sanitize_for_fname(slot_sel.replace(":", "")) if has_slots else f"h{h_sel}"
+            csv_data = out.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="📥 Descargar CSV",
+                data=csv_data,
+                file_name=f"top5_{id0}_{suffix}.csv",
+                mime="text/csv"
             )
 
 else:
